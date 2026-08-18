@@ -1,0 +1,200 @@
+/ --- PIN DEFINITIONS FOR YOUR 6-PIN SETUP ---
+// Pump 1 (Neutral Water)
+#define PUMP1_IN1 8
+#define PUMP1_IN2 7
+#define PUMP1_ENA 9
+
+// Pump 2 (NaCl Solution)
+#define PUMP2_IN3 5
+#define PUMP2_IN4 3 // Updated to pin 3
+#define PUMP2_ENB 4 // Updated to pin 4
+
+// Define the analog pin for the salinity sensor
+#define SALINITY_SENSOR_PIN A0 // Connected to Arduino Analog Pin A0
+
+// === CONFIGURATION PARAMETERS (ADJUST THESE!) ===
+const int PROPAGATION_DELAY_MS = 8000;  // Time for liquid to travel from pumps to sensor.
+const int SENSOR_READ_DELAY_MS = 2000;  // Time to wait for sensor reading to stabilize.
+const int FLUSH_DURATION_MS = 10000;    // Duration to flush the pipe with neutral water after each transmission.
+
+// === DECODING THRESHOLDS (BASED ON YOUR SPECIFIED VALUES) ===
+// Note: These values define the upper bound for each symbol range,
+// e.g., if voltage < 0.1, it's symbol 0.
+const float THRESHOLD_0_UPPER = 0.1;   // Voltage < 0.1 -> Symbol 0
+const float THRESHOLD_1_UPPER = 0.3;   // Voltage < 0.3 -> Symbol 1
+const float THRESHOLD_2_UPPER = 0.6;   // Voltage < 0.6 -> Symbol 2
+const  float THRESHOLD_3_UPPER = 0.9;   // Voltage < 0.9 -> Symbol 3
+const float THRESHOLD_4_UPPER = 1.230; // Voltage < 1.230 -> Symbol 4
+const float THRESHOLD_5_UPPER = 1.347; // Voltage < 1.347 -> Symbol 5
+const float THRESHOLD_6_UPPER = 1.377; // Voltage < 1.377 -> Symbol 6
+// Anything >= 1.377 will be considered Symbol 7
+
+
+void setup() {
+  Serial.begin(9600);
+  Serial.println("Molecular Communication Testbed Initialized (6-Pin Control).");
+  Serial.println("Enter a number (0-7) via Serial Monitor to transmit a symbol.");
+
+  pinMode(PUMP1_IN1, OUTPUT);
+  pinMode(PUMP1_IN2, OUTPUT);
+  pinMode(PUMP1_ENA, OUTPUT);
+  pinMode(PUMP2_IN3, OUTPUT);
+  pinMode(PUMP2_IN4, OUTPUT);
+  pinMode(PUMP2_ENB, OUTPUT);
+
+  stopAllPumps();
+  delay(100);
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    char inputChar = Serial.read();
+    if (inputChar >= '0' && inputChar <= '7') {
+      int symbol = inputChar - '0';
+      transmitAndMeasure(symbol);
+    } else {
+      Serial.println("Invalid input. Please enter a number between 0 and 7.");
+    }
+  }
+}
+
+/**
+ * Transmits a given symbol (0-7) by controlling the pumps based on custom durations,
+ * waits for propagation, measures salinity, and then decodes the symbol.
+ */
+void transmitAndMeasure(int symbol) {
+  Serial.println("-------------------------");
+  Serial.print("Transmitting symbol: ");
+  Serial.println(symbol);
+
+  // Custom timing logic for each symbol (your provided durations)
+  long pump1_duration = 0;
+  long pump2_duration = 0;
+
+  switch (symbol) {
+    case 0: pump1_duration = 10000; pump2_duration = 0; break;
+    case 1: pump1_duration = 7000;   pump2_duration = 3000; break;
+    case 2: pump1_duration = 6000;   pump2_duration = 3000; break;
+    case 3: pump1_duration = 4000;   pump2_duration = 7000; break;
+    case 4: pump1_duration = 5000;   pump2_duration = 9000; break;
+    case 5: pump1_duration = 5000;   pump2_duration = 13000; break;
+    case 6: pump1_duration = 3000;   pump2_duration = 13000; break;
+    case 7: pump1_duration = 0;      pump2_duration = 18000; break;
+    default: // Should not happen with input validation, but good practice
+      Serial.println("Error: Unknown symbol for pump durations.");
+      stopAllPumps();
+      return;
+  }
+
+  Serial.print("Pump 1 (Neutral Water) ON for: ");
+  Serial.print(pump1_duration);
+  Serial.println(" ms");
+  Serial.print("Pump 2 (NaCl Solution) ON for: ");
+  Serial.print(pump2_duration);
+  Serial.println(" ms");
+
+  unsigned long startTime = millis();
+
+  if (pump1_duration > 0) runPump1();
+  if (pump2_duration > 0) runPump2();
+
+  // Your original while loop for pump control
+  while (millis() - startTime < pump1_duration || millis() - startTime < pump2_duration) {
+    if (millis() - startTime >= pump1_duration) stopPump1();
+    if (millis() - startTime >= pump2_duration) stopPump2();
+    delay(1); // Small delay to prevent busy-waiting
+  }
+
+  stopAllPumps(); // Ensure both pumps are stopped after the loop
+  Serial.println("Pumps stopped. Waiting for mixed solution to propagate to sensor...");
+  delay(PROPAGATION_DELAY_MS);
+
+  Serial.println("Reading sensor...");
+  delay(SENSOR_READ_DELAY_MS);
+
+  int sensorValue = analogRead(SALINITY_SENSOR_PIN);
+  float voltage = sensorValue * (5.0 / 1023.0); // Convert to voltage
+
+  Serial.print("Received Sensor Raw Value: ");
+  Serial.print(sensorValue);
+  Serial.print(" -> Measured Voltage: ");
+  Serial.println(voltage, 3); // Print voltage with 3 decimal places
+
+  // --- Decode the measured voltage into a symbol ---
+  int decodedSymbol = decodeSymbol(voltage);
+  Serial.print("Decoded Symbol: ");
+  Serial.println(decodedSymbol);
+  Serial.print("Transmitted Symbol: "); // Added for comparison
+  Serial.println(symbol);
+  
+  // --- ADDED PRINT STATEMENT PART ---
+  if (decodedSymbol == symbol) {
+      Serial.println("Decoding: SUCCESS!");
+      Serial.println("Hello welcome to BIWIL Lab! Your data transmission is successful.");
+  } else {
+      Serial.println("Decoding: ERROR! (Mismatch)");
+      Serial.println("Hello welcome to BIWIL Lab! Your data transfer has some error, please check.");
+  }
+  // --- END ADDED PRINT STATEMENT PART ---
+
+
+  flushChannel();
+  Serial.println("-------------------------\n");
+  Serial.println("System ready for next symbol. Enter a number (0-7).");
+}
+
+/**
+ * Decodes the measured voltage from the salinity sensor into an integer symbol (0-7).
+ * Uses the specified voltage thresholds.
+ */
+int decodeSymbol(float voltage) {
+  if (voltage < THRESHOLD_0_UPPER) {
+    return 0;
+  } else if (voltage < THRESHOLD_1_UPPER) {
+    return 1;
+  } else if (voltage < THRESHOLD_2_UPPER) {
+    return 2;
+  } else if (voltage < THRESHOLD_3_UPPER) {
+    return 3;
+  } else if (voltage < THRESHOLD_4_UPPER) {
+    return 4;
+  } else if (voltage < THRESHOLD_5_UPPER) { // Corrected typo
+    return 5;
+  } else if (voltage < THRESHOLD_6_UPPER) {
+    return 6;
+  } else {
+    // If it's not below any of the other thresholds, it must be Symbol 7
+    return 7;
+  }
+}
+
+
+void flushChannel() {
+  Serial.println("Flushing channel with neutral water...");
+  runPump1();
+  delay(FLUSH_DURATION_MS);
+  stopPump1();
+  Serial.println("Flushing complete.");
+}
+
+// --- Pump Control Helper Functions (Unchanged) ---
+void runPump1() {
+  digitalWrite(PUMP1_IN1, HIGH);
+  digitalWrite(PUMP1_IN2, LOW);
+  digitalWrite(PUMP1_ENA, HIGH);
+}
+void runPump2() {
+  digitalWrite(PUMP2_IN3, HIGH);
+  digitalWrite(PUMP2_IN4, LOW);
+  digitalWrite(PUMP2_ENB, HIGH);
+}
+void stopPump1() {
+  digitalWrite(PUMP1_ENA, LOW);
+}
+void stopPump2() {
+  digitalWrite(PUMP2_ENB, LOW);
+}
+void stopAllPumps() {
+  stopPump1();
+  stopPump2();
+}
